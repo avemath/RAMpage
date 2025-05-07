@@ -1,5 +1,5 @@
-### RAMpage
-##Project Overview
+**## RAMpage**
+**#Project Overview**
 RAMpage is a 30lb combat robot built for the Bengal Bot competition. This repository contains the control software running on the robot's Raspberry Pi 4B and Raspberry Pi Pico W, handling remote operation, weapon control, safety systems, and video streaming.
 
 #System Architecture
