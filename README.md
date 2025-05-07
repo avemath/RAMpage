@@ -1,8 +1,8 @@
-**RAMpage**
+# RAMpage
 
 ---
 
-**Project Overview**
+## Project Overview
 
 
 RAMpage is a 30lb combat robot built for the Bengal Bot competition. This repository contains the control software running on the robot's Raspberry Pi 4B and Raspberry Pi Pico W, handling remote operation, weapon control, safety systems, and video streaming.
@@ -26,11 +26,11 @@ Communication is managed through:
 **Files Overview**
 
 
-- pico_direct.py: Main weapon control code for the Raspberry Pi Pico W
-- pi4_direct.py: Video streaming code for the Raspberry Pi 4B
-- video_direct.py: Client-side video receiver code for the operator laptop
-- temp_test.py: Test script for monitoring Pi CPU temperature
-- weapon_latency_test.py: Test script for weapon system response times
+- *pico_direct.py*: Main weapon control code for the Raspberry Pi Pico W
+- *pi4_direct.py*: Video streaming code for the Raspberry Pi 4B
+- *video_direct.py*: Client-side video receiver code for the operator laptop
+- *temp_test.py*: Test script for monitoring Pi CPU temperature
+- *weapon_latency_test.py*: Test script for weapon system response times
 
 ---
 
@@ -50,7 +50,7 @@ Communication is managed through:
 
 - Raspberry Pi OS with Python 3
 - MicroPython installed on Raspberry Pi Pico W
-- Required Python packages: OpenCV, NumPy, Picamera2
+- Required Python packages: `OpenCV`, `NumPy`, `Picamera2`
 
 ---
 
@@ -89,8 +89,8 @@ The video streaming system features:
 **Testing and Validation**
 
 
-- temp_test.py: Monitors CPU temperature to ensure the robot doesn't overheat
-- weapon_latency_test.py: Measures weapon system response time
+- *temp_test.py*: Monitors CPU temperature to ensure the robot doesn't overheat
+- *weapon_latency_test.py*: Measures weapon system response time
 
 ---
 
