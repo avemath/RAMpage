@@ -30,7 +30,7 @@ This file lists all open-source libraries, tools, and documentation used in the 
   Used for UDP video transmission between Pi and PC.  
   https://docs.python.org/3/library/socket.html
 
-- **AFHDS 2A Protocol** — Community Documentation  
+- **AFHDS 2A Protocol** 
   Used to decode PWM signals from FlySky iA6B receiver.  
   https://www.multi-module.org/using-the-module/protocol-details/flysky-afhds2a
 
