@@ -1,6 +1,5 @@
 # RAMpage
 
----
 
 ## Project Overview
 
@@ -9,7 +8,7 @@ RAMpage is a 30lb combat robot built for the Bengal Bot competition. This reposi
 
 ---
 
-**System Architecture**
+## System Architecture
 
 
 The robot uses a dual-controller approach:
@@ -23,18 +22,18 @@ Communication is managed through:
 
 ---
 
-**Files Overview**
+## Files Overview
 
 
-- *pico_direct.py*: Main weapon control code for the Raspberry Pi Pico W
-- *pi4_direct.py*: Video streaming code for the Raspberry Pi 4B
-- *video_direct.py*: Client-side video receiver code for the operator laptop
-- *temp_test.py*: Test script for monitoring Pi CPU temperature
-- *weapon_latency_test.py*: Test script for weapon system response times
+- **pico_direct.py**: Main weapon control code for the Raspberry Pi Pico W
+- **pi4_direct.py**: Video streaming code for the Raspberry Pi 4B
+- **video_direct.py**: Client-side video receiver code for the operator laptop
+- **temp_test.py**: Test script for monitoring Pi CPU temperature
+- **weapon_latency_test.py**: Test script for weapon system response times
 
 ---
 
-**Hardware Requirements**
+## Hardware Requirements
 
 
 - Raspberry Pi 4B with camera interface
@@ -45,7 +44,7 @@ Communication is managed through:
 
 ---
 
-**Software Requirements**
+## Software Requirements
 
 
 - Raspberry Pi OS with Python 3
@@ -54,7 +53,7 @@ Communication is managed through:
 
 ---
 
-**Use the FlySky controller to operate the robot:**
+## Use the FlySky controller to operate the robot:
 
 
 - Left stick: Left motor control
@@ -64,7 +63,7 @@ Communication is managed through:
 
 ---
 
-**Weapon System**
+## Weapon System
 
 
 The pneumatic weapon system uses:
@@ -75,7 +74,7 @@ The pneumatic weapon system uses:
 
 ---
 
-**Video System**
+## Video System
 
 
 The video streaming system features:
@@ -86,15 +85,15 @@ The video streaming system features:
 
 ---
 
-**Testing and Validation**
+## Testing and Validation
 
 
-- *temp_test.py*: Monitors CPU temperature to ensure the robot doesn't overheat
-- *weapon_latency_test.py*: Measures weapon system response time
+- **temp_test.py**: Monitors CPU temperature to ensure the robot doesn't overheat
+- **weapon_latency_test.py**: Measures weapon system response time
 
 ---
 
-**License**
+## License
 
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+This project is licensed under the MIT License. See the **LICENSE** file for details.
