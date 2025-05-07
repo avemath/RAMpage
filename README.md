@@ -10,7 +10,6 @@ RAMpage is a 30lb combat robot built for the Bengal Bot competition. This reposi
 
 The robot uses a dual-controller approach:
 Raspberry Pi 4B: Handles video streaming from the fisheye camera to the operator laptop
-
 Raspberry Pi Pico W: Controls the pneumatic weapon system and safety mechanisms
 
 Communication is managed through:
