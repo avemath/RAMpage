@@ -26,24 +26,27 @@ The two systems are independent. A crash or hang on the video side does not affe
 
 ## Weapon System
 
-RAMpage uses a pneumatic plow driven by two solenoid valves - a main reservoir valve (exhaust) on GP14 and a piston valve on GP15. Both are normally-closed relays.
+RAMpage uses a pneumatic plow. As built:
+
+- **Two reservoirs:** seamless aluminum, rated 200 psi, charged before a match from an external compressor through a Schrader valve. There is no compressor on the robot (vibration, power and weight).
+- **Two inlet valves (GP15):** each reservoir has its own quarter-inch inlet solenoid valve (12 V, 8.5 W). Both open together; in the code they are `piston_solenoid`. They feed one shared supply line.
+- **Two cylinders:** the shared line drives two pneumatic cylinders, one above the other, each with its own rod, both pushing the one plow. About 80 lbf per cylinder at 200 psi.
+- **One exhaust valve (GP14):** a half-inch outlet solenoid valve (12 V, 16 W) branches off the shared line to atmosphere; in the code it is `main_solenoid`. It is a branch to atmosphere, not a stage between the reservoirs and the cylinders. It sits open when idle so the plow stays pulled in, and it is forced open on any error or emergency stop.
 
 **Firing Sequence**
 
-Each activation follows a precise valve sequence to build pressure correctly before extending the plow:
+Each activation follows a fixed valve sequence:
 
-1. Open main valve (exhaust) - allows air to fill the system
-2. 50 ms delay - pressure builds
-3. Close main valve
-4. 50 ms dwell
-5. Open piston valve - extends the plow
-6. Hold open for 400 ms - full extension
-7. Close piston valve
-8. Re-open main valve - vents the system
+1. Exhaust open, 50 ms (plow home)
+2. Exhaust closes
+3. 50 ms dwell
+4. Both inlets open, 400 ms (plow out, full extension)
+5. Inlets close
+6. Exhaust reopens (the plow vents and retracts)
 
 **Activation Limits**
 
-The pneumatic system has a finite air supply. The Pico enforces a hard limit of **17 activations** - a value determined empirically through weapon latency testing. After 17 fires, the weapon is locked out and the LED pattern switches to a rapid double-blink. A 500 ms cooldown is enforced between each activation to prevent valve damage from rapid cycling.
+The pneumatic system has a finite air supply. The Pico enforces a hard limit of **17 activations** in firmware. The team's air analysis found that only about the first **six** cycles deliver more than 30 lbf before reservoir pressure drops too far (predicted five, measured six); later cycles still fire, with less force. After 17 fires, the weapon is locked out and the LED pattern switches to a rapid double-blink. A 500 ms cooldown is enforced between each activation to prevent valve damage from rapid cycling.
 
 **Safety Logic**
 
@@ -53,7 +56,7 @@ The Pico implements three emergency stop triggers:
 - **Signal loss:** If either CH5 or CH6 goes more than 1000 ms without a valid PWM pulse, the Pico treats this as a lost transmitter and triggers emergency stop. It recovers automatically once both signals return.
 - **Startup interlock:** If the kill switch is ON when the Pico boots, it enters emergency stop immediately and waits for the operator to turn it off before allowing any operation.
 
-In emergency stop, all solenoids are reset to their safe state (main valve open, piston valve closed), and the LED blinks rapidly to indicate the condition.
+In emergency stop, all solenoids are reset to their safe state (exhaust open, inlets closed), and the LED blinks rapidly to indicate the condition.
 
 ---
 
