@@ -56,8 +56,23 @@ CH3 were plugged straight into the ESC and only CH5 and CH6 went to the Pico.
 3. Connect the ESC left motor signal wire to GP20 and the right motor signal
    wire to GP21.
 
-## To fill in on the robot
+## ESC and transmitter setup
 
-- TODO: which ESC motor inputs (M1 to M4) are the left and right motors.
-- TODO: confirm the ESC is in bidirectional mode with 1500 us as neutral.
-- TODO: transmitter failsafe: CH5 = ON (kill), CH2 and CH3 = center.
+- ESC is in bidirectional mode with 1500 us as neutral. (Confirmed Nov 2026.)
+- Transmitter failsafe: CH5 = ON (kill), CH2 and CH3 = center. (Done Nov 2026.)
+
+## Which motor pad is which
+
+Not recorded anywhere yet, and the code no longer depends on it. To find it:
+
+1. Wheels off the ground, reservoirs empty, transmitter on, kill switch OFF.
+2. Run `drive_id_test.py` on the Pico from Thonny. It spins GP20, then GP21,
+   slowly forward for 2 s each, waiting for Enter before each one.
+3. Set `SWAP_LEFT_RIGHT`, `INVERT_LEFT` and `INVERT_RIGHT` near the top of
+   `pico_direct.py` from what it shows.
+4. Fill in this table so the next person doesn't have to repeat it:
+
+| Pico pin | ESC pad (M1 to M4) | Wheel | Notes |
+|---|---|---|---|
+| GP20 | TODO | TODO | |
+| GP21 | TODO | TODO | |

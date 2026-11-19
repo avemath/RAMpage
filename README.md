@@ -62,7 +62,7 @@ In emergency stop, drive is held at neutral, the solenoids are held in their saf
 
 **Limits of the software stop (set these up on the hardware)**
 
-- **Transmitter off or out of range:** the FS-iA6B keeps sending pulses when it loses the transmitter, so the Pico cannot detect that by itself. Set the transmitter failsafe so CH5 goes to ON (kill) on signal loss, and CH2/CH3 go to center (1500), not low throttle. Then a lost transmitter looks like a kill switch flip.
+- **Transmitter off or out of range:** the FS-iA6B keeps sending pulses when it loses the transmitter, so the Pico cannot detect that by itself. The transmitter failsafe is set so CH5 goes to ON (kill) on signal loss, and CH2/CH3 go to center (1500), not low throttle. A lost transmitter therefore looks like a kill switch flip. Re-check the failsafe after rebinding the receiver.
 - **Pico crash or power loss:** the ESC must stop the motors when its signal pulses disappear. Test this on the bench with the wheels off the ground.
 - **Exhaust valve:** it is normally closed, so "exhaust open" needs 12 V and a working Pico. A power loss closes it. The manual purge is the fallback.
 
@@ -133,6 +133,8 @@ The weapon fires on the rising edge of SwD, not while held. Holding the trigger 
 ## Testing Scripts
 
 **`temp_test.py`** - Reads CPU temperature from `/sys/class/thermal/thermal_zone0/temp` on the Pi 4B every second for 60 seconds and reports max and average. The safe operating limit is 85°C; the script warns at 80°C. This matters because the Pi 4B runs encoding and socket I/O simultaneously inside a robot with limited airflow - thermal throttling would drop the stream frame rate at the worst possible moment.
+
+**`drive_id_test.py`** - Runs on the Pico W with the wheels off the ground. Spins the GP20 output, then the GP21 output, slowly forward for 2 seconds each (it waits for Enter before each spin) so I can see which wheel each output drives and which way it turns. The kill switch stops it at any time. The result sets `SWAP_LEFT_RIGHT`, `INVERT_LEFT` and `INVERT_RIGHT` in `pico_direct.py`. See [`hardware/WIRING.md`](hardware/WIRING.md).
 
 **`weapon_latency_test.py`** - Runs on the Pico W and measures the time between the weapon trigger rising edge (SwD/CH6) and the physical solenoid response, detected via an interrupt on the exhaust valve relay line (GP14, used as an input in this test only). Latency values under 200 ms are recorded; the target is under 50 ms. Reports min, max, and average across all activations during a 30-second window. The results from this test informed the final values in `pico_direct.py` - specifically `MAX_WEAPON_ACTIVATIONS = 17` and the solenoid timing constants.
 

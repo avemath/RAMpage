@@ -24,7 +24,7 @@ THINGS THE CODE CANNOT DO FOR ME (must be set up on the hardware):
    pulses when it loses the transmitter, so the Pico cannot see that kind of
    signal loss by itself. In the transmitter failsafe menu, set CH5 to the ON
    (kill) position so a lost transmitter looks like a kill switch flip, and
-   set CH2 and CH3 to center (1500), not to low throttle.
+   set CH2 and CH3 to center (1500), not to low throttle. (Done Nov 2026.)
 2. The Pico is now a single point of failure for driving. If this program
    stops, the watchdog resets the Pico, its pins stop sending pulses, and the
    ESC must stop the motors on "no signal". Bench test this with the wheels off the ground.
@@ -63,8 +63,19 @@ PWM_CENTER = 1500   # 1.5 ms pulse (center/neutral position)
 
 # Drive output
 ESC_PWM_FREQ = 50          # Hz - standard RC frame rate (one pulse every 20 ms)
-DRIVE_NEUTRAL_US = 1500    # Pulse that means "stop" for a reversible ESC.
-                           # NOTE: check this matches how the ESC was calibrated.
+DRIVE_NEUTRAL_US = 1500    # Stop. Confirmed: the ESC is in bidirectional mode
+                           # with 1500 us as neutral.
+
+# Drive mapping fixes. Run drive_id_test.py with the wheels off the ground,
+# then set these so the robot drives the way the sticks say:
+# - SWAP_LEFT_RIGHT: True if the left stick moves the RIGHT wheel
+#   (the GP20/GP21 wires landed on the opposite motor pads).
+# - INVERT_LEFT / INVERT_RIGHT: True if that wheel spins backward when its
+#   stick is pushed forward. Same effect as reversing the motor in BLHeli or
+#   swapping two motor phase wires; only do ONE of those, not two.
+SWAP_LEFT_RIGHT = False
+INVERT_LEFT = False
+INVERT_RIGHT = False
 
 # FlySky switch threshold
 SWITCH_ON_THRESHOLD = 1700   # Above this value, switch is ON
@@ -216,7 +227,18 @@ def any_signal_lost(now):
 
 
 def set_drive(left_us, right_us):
-    """Send pulse widths (microseconds) to the left and right motor inputs, limited to 1000-2000."""
+    """
+    Send the left and right stick commands (microseconds) to the ESC.
+
+    Applies the SWAP/INVERT settings, then limits each pulse to 1000-2000 us.
+    Inverting mirrors the pulse around neutral: 1700 becomes 1300.
+    """
+    if INVERT_LEFT:
+        left_us = 2 * DRIVE_NEUTRAL_US - left_us
+    if INVERT_RIGHT:
+        right_us = 2 * DRIVE_NEUTRAL_US - right_us
+    if SWAP_LEFT_RIGHT:
+        left_us, right_us = right_us, left_us
     left_us = min(max(left_us, PWM_MIN), PWM_MAX)
     right_us = min(max(right_us, PWM_MIN), PWM_MAX)
     esc_left.duty_ns(left_us * 1000)
