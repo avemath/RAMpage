@@ -6,6 +6,10 @@ Simple test to measure weapon system response time:
 - Monitors FlySky weapon trigger (CH6)
 - Measures time between trigger activation and solenoid response
 
+NOTE: this is a bench test with its own wiring. GP14 is an INPUT here (it
+watches the exhaust valve relay line), while pico_direct.py drives GP14 as an
+output. This script does not send a drive signal, so the motors stay off.
+
 MIT License
 """
 
@@ -18,9 +22,9 @@ import sys
 # RC receiver pin for weapon trigger
 CH6_PIN = 19     # SwD - Weapon trigger
 
-# Solenoid pins (match pico_direct.py)
-MAIN_SOLENOID_PIN = 14    # Main valve (reservoir)
-PISTON_SOLENOID_PIN = 15  # Piston valve
+# Solenoid pins (same pin numbers and names as pico_direct.py)
+MAIN_SOLENOID_PIN = 14    # Exhaust valve relay
+PISTON_SOLENOID_PIN = 15  # Inlet valves relay (both reservoirs)
 
 # ======= CONSTANTS =======
 # FlySky switch thresholds
@@ -45,8 +49,8 @@ latency_values = []      # All measured latency values
 # ======= HARDWARE SETUP =======
 print("\n===== RAMpage Combat Robot - Weapon Response Time Test =====")
 
-# Set up LED for status indication
-led = Pin(25, Pin.OUT)
+# Set up LED for status indication ("LED" works on the Pico W, GP25 does not)
+led = Pin("LED", Pin.OUT)
 led.value(0)  # Start with LED off
 
 # Set up solenoid monitoring

@@ -3,10 +3,10 @@ RAMpage 30lb Combat Robot - Main Pico Code
 Team 22: Avery, Nick, Chris, Miles, Matthew
 
 Main controller for the Raspberry Pi Pico W:
-- Drive pass-through: reads the two drive channels (CH2, CH3) from the FlySky
-  receiver and re-creates the PWM signal for the two drive ESCs. Because the
-  drive signal now goes THROUGH the Pico, the emergency stop can force both
-  ESCs to neutral.
+- Drive pass-through: reads the two drive channels (CH2 = left motor,
+  CH3 = right motor) from the FlySky receiver and re-creates the PWM signal
+  for the two motor inputs of the 4-in-1 ESC. Because the drive signal now
+  goes THROUGH the Pico, the emergency stop can force both motors to neutral.
 - Reads weapon trigger and kill switch from the FlySky receiver
 - Controls the pneumatic weapon system with an activation counter
 - Emergency stop (kill switch, lost receiver signal, startup interlock)
@@ -14,17 +14,20 @@ Main controller for the Raspberry Pi Pico W:
 WIRING (changed from the original "direct" version, see README):
     Receiver CH2 -> level shifter -> GP16      Receiver CH5 -> level shifter -> GP18
     Receiver CH3 -> level shifter -> GP17      Receiver CH6 -> level shifter -> GP19
-    GP20 -> ESC A signal (was receiver CH2)    GP21 -> ESC B signal (was receiver CH3)
+    GP20 -> ESC left motor signal input  (this wire used to come from receiver CH2)
+    GP21 -> ESC right motor signal input (this wire used to come from receiver CH3)
     Pico GND, receiver GND and ESC signal GND must all be connected together.
+    Full table and diagram: hardware/WIRING.md
 
 THINGS THE CODE CANNOT DO FOR ME (must be set up on the hardware):
 1. Transmitter turned off / out of range: the iA6B receiver keeps sending
    pulses when it loses the transmitter, so the Pico cannot see that kind of
    signal loss by itself. In the transmitter failsafe menu, set CH5 to the ON
-   (kill) position so a lost transmitter looks like a kill switch flip.
+   (kill) position so a lost transmitter looks like a kill switch flip, and
+   set CH2 and CH3 to center (1500), not to low throttle.
 2. The Pico is now a single point of failure for driving. If this program
    stops, the watchdog resets the Pico, its pins stop sending pulses, and the
-   ESCs must stop on "no signal". Bench test this with the wheels off the ground.
+   ESC must stop the motors on "no signal". Bench test this with the wheels off the ground.
 3. The exhaust valve is normally closed, so "exhaust open" needs power. If the
    Pico or the 12 V rail dies, the exhaust valve closes.
 
@@ -38,15 +41,15 @@ import sys
 
 # ======= PIN CONFIG =======
 # RC receiver input pins - FlySky iA6B (5 V signals, through the level shifter)
-CH2_PIN = 16     # Drive channel A (right stick up/down)
-CH3_PIN = 17     # Drive channel B (left stick up/down)
+CH2_PIN = 16     # Left motor  (left stick up/down)
+CH3_PIN = 17     # Right motor (right stick up/down)
 CH5_PIN = 18     # SwA - Kill switch (top left)
 CH6_PIN = 19     # SwD - Weapon trigger (top right)
 
-# Drive ESC output pins (3.3 V servo-style PWM made by the Pico)
+# Drive output pins to the SEQURE 4-in-1 ESC (3.3 V servo-style PWM made by the Pico)
 # GP20 and GP21 share one PWM slice, which is fine because both run at 50 Hz.
-ESC_A_PIN = 20   # Passes CH2 through
-ESC_B_PIN = 21   # Passes CH3 through
+ESC_LEFT_PIN = 20    # Left motor signal, passes CH2 through
+ESC_RIGHT_PIN = 21   # Right motor signal, passes CH3 through
 
 # Solenoid pins - Normally Closed (NC) valves
 MAIN_SOLENOID_PIN = 14    # Exhaust valve relay (open when idle)
@@ -121,16 +124,16 @@ print("\n===== RAMpage Combat Robot - Main Pico Code =====")
 led = Pin("LED", Pin.OUT)
 led.value(0)
 
-# Drive ESC outputs - start at neutral before anything else happens
+# Drive outputs to the ESC - start at neutral before anything else happens
 # https://docs.micropython.org/en/latest/library/machine.PWM.html
 try:
-    esc_a = PWM(Pin(ESC_A_PIN))
-    esc_b = PWM(Pin(ESC_B_PIN))
-    esc_a.freq(ESC_PWM_FREQ)
-    esc_b.freq(ESC_PWM_FREQ)
-    esc_a.duty_ns(DRIVE_NEUTRAL_US * 1000)
-    esc_b.duty_ns(DRIVE_NEUTRAL_US * 1000)
-    print(f"Drive ESC outputs on GP{ESC_A_PIN} and GP{ESC_B_PIN} (neutral)")
+    esc_left = PWM(Pin(ESC_LEFT_PIN))
+    esc_right = PWM(Pin(ESC_RIGHT_PIN))
+    esc_left.freq(ESC_PWM_FREQ)
+    esc_right.freq(ESC_PWM_FREQ)
+    esc_left.duty_ns(DRIVE_NEUTRAL_US * 1000)
+    esc_right.duty_ns(DRIVE_NEUTRAL_US * 1000)
+    print(f"Drive ESC outputs on GP{ESC_LEFT_PIN} and GP{ESC_RIGHT_PIN} (neutral)")
 except Exception as e:
     print(f"Drive output setup failed: {e}")
     sys.exit(1)
@@ -196,8 +199,8 @@ class RCChannel:
 
 
 try:
-    ch2 = RCChannel(CH2_PIN)   # Drive A
-    ch3 = RCChannel(CH3_PIN)   # Drive B
+    ch2 = RCChannel(CH2_PIN)   # Left motor
+    ch3 = RCChannel(CH3_PIN)   # Right motor
     ch5 = RCChannel(CH5_PIN)   # Kill switch
     ch6 = RCChannel(CH6_PIN)   # Weapon trigger
     print(f"RC inputs: drive GP{CH2_PIN}/GP{CH3_PIN}, kill GP{CH5_PIN}, weapon GP{CH6_PIN}")
@@ -212,18 +215,18 @@ def any_signal_lost(now):
     return ch2.lost(now) or ch3.lost(now) or ch5.lost(now) or ch6.lost(now)
 
 
-def set_drive(a_us, b_us):
-    """Send pulse widths (microseconds) to the two drive ESCs, limited to 1000-2000."""
-    a_us = min(max(a_us, PWM_MIN), PWM_MAX)
-    b_us = min(max(b_us, PWM_MIN), PWM_MAX)
-    esc_a.duty_ns(a_us * 1000)
-    esc_b.duty_ns(b_us * 1000)
+def set_drive(left_us, right_us):
+    """Send pulse widths (microseconds) to the left and right motor inputs, limited to 1000-2000."""
+    left_us = min(max(left_us, PWM_MIN), PWM_MAX)
+    right_us = min(max(right_us, PWM_MIN), PWM_MAX)
+    esc_left.duty_ns(left_us * 1000)
+    esc_right.duty_ns(right_us * 1000)
 
 
 def drive_neutral():
-    """Command both drive ESCs to stop."""
-    esc_a.duty_ns(DRIVE_NEUTRAL_US * 1000)
-    esc_b.duty_ns(DRIVE_NEUTRAL_US * 1000)
+    """Command both drive motors to stop."""
+    esc_left.duty_ns(DRIVE_NEUTRAL_US * 1000)
+    esc_right.duty_ns(DRIVE_NEUTRAL_US * 1000)
 
 
 def solenoids_safe():
@@ -317,7 +320,7 @@ def abort_weapon():
 # ======= EMERGENCY STOP =======
 def trigger_emergency_stop(cause, now):
     """
-    Emergency stop: drive ESCs to neutral, inlets closed, exhaust open.
+    Emergency stop: both drive motors to neutral, inlets closed, exhaust open.
 
     This is a software stop. The removable link on the battery is still the
     real power cut-off, which follows the RioBotz advice that the main
@@ -375,7 +378,7 @@ def print_status(now):
     print(f"Signal status: {'LOST' if any_signal_lost(now) else 'Good'}")
     print(f"Weapon activations: {weapon_activations}/{MAX_WEAPON_ACTIVATIONS}" +
           (" (DEPLETED)" if weapon_depleted else ""))
-    print(f"Raw values - Drive:{ch2.pulse_width}/{ch3.pulse_width} "
+    print(f"Raw values - Left:{ch2.pulse_width} Right:{ch3.pulse_width} "
           f"Kill:{ch5.pulse_width} Weapon:{ch6.pulse_width}")
 
 
@@ -390,7 +393,7 @@ def main():
     print("\n===== STARTING CONTROL SYSTEM =====")
     print("Waiting for RC signals to stabilize (drive held at neutral)...")
 
-    # Startup delay. Drive stays at neutral, which also lets the ESCs arm.
+    # Startup delay. Drive stays at neutral, which also lets the ESC arm.
     startup_start = utime.ticks_ms()
     while utime.ticks_diff(utime.ticks_ms(), startup_start) < STARTUP_DELAY:
         set_led((utime.ticks_ms() % 500) < 250)
@@ -450,7 +453,7 @@ def main():
                 utime.sleep_ms(LOOP_DELAY)
                 continue
 
-            # Drive pass-through: copy the stick pulses to the ESCs
+            # Drive pass-through: copy the stick pulses to the ESC
             set_drive(ch2.pulse_width, ch3.pulse_width)
 
             # Weapon: fire once on the OFF -> ON edge of the trigger
