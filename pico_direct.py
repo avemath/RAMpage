@@ -64,7 +64,7 @@ PWM_CENTER = 1500   # 1.5 ms pulse (center/neutral position)
 # Drive output
 ESC_PWM_FREQ = 50          # Hz - standard RC frame rate (one pulse every 20 ms)
 DRIVE_NEUTRAL_US = 1500    # Pulse that means "stop" for a reversible ESC.
-                           # NOTE: check this matches how the ESCs were calibrated.
+                           # NOTE: check this matches how the ESC was calibrated.
 
 # FlySky switch threshold
 SWITCH_ON_THRESHOLD = 1700   # Above this value, switch is ON
