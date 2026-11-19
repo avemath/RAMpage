@@ -73,7 +73,7 @@ def parse_arguments():
 
 def signal_handler(sig, frame):
    
-     """
+    """
     Handle Ctrl+C (SIGINT) and other termination signals gracefully
 
     Source:
@@ -189,7 +189,7 @@ def add_overlay(frame, fps=0):
 
 def stream_video(client_ip, port, debug=False):
     
-     """
+    """
     Stream video from Raspberry Pi camera to client (pc)
     
     Main video streaming loop that:
