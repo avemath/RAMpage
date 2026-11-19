@@ -56,6 +56,12 @@ This file lists all open-source libraries, tools, and documentation used in the 
 
 ##  Development References
 
+- **MicroPython `machine.PWM` and `machine.WDT`** — *MIT License*  
+  Used to generate the 50 Hz drive ESC signals on the Pico W and to reset it if the main loop hangs.  
+  https://docs.micropython.org/en/latest/library/machine.PWM.html  
+  https://docs.micropython.org/en/latest/library/machine.WDT.html  
+  https://docs.micropython.org/en/latest/rp2/quickref.html
+
 - **Raspberry Pi Pico Python SDK**  
   GPIO, timing, and peripheral access reference for MicroPython.  
   https://datasheets.raspberrypi.com/pico/raspberry-pi-pico-python-sdk.pdf
