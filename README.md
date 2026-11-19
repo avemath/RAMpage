@@ -2,7 +2,7 @@
 
 RAMpage is a 30-pound combat robot built by Team 22 (Avery, Nick, Chris, Miles, Matthew) for the Bengal Bot competition. The robot uses a pneumatic plow as its primary weapon - a system that demands precise timing, hard activation limits, and fail-safe behavior that must work correctly even under signal loss or electrical noise from combat.
 
-The core engineering challenge is coordinating two independent controllers in real time. A Raspberry Pi 4B handles video streaming to the driver station while a Raspberry Pi Pico W manages weapon control and safety logic. Getting both systems to operate reliably under combat conditions - EMI, vibration, intermittent wireless - required careful design decisions at every layer.
+The core engineering challenge is coordinating two independent controllers in real time. A Raspberry Pi 4B handles video streaming to the driver station while a Raspberry Pi Pico W manages drive pass-through, weapon control and safety logic. Getting both systems to operate reliably under combat conditions - EMI, vibration, intermittent wireless - required careful design decisions at every layer.
 
 ---
 
@@ -14,9 +14,9 @@ The system is split across two controllers, each responsible for what it does be
 
 The Pico W runs the weapon control loop. It reads PWM signals from the FlySky FS-iA6B receiver using hardware interrupts, sequences the pneumatic solenoid valves, enforces the activation limit and cooldown, and handles emergency stop logic. The Pico is the right choice here because it has deterministic real-time behavior - there's no Linux scheduler adding jitter to interrupt handlers, and MicroPython's `machine.Pin.irq` fires on every edge with microsecond-resolution timestamps. The weapon system cannot tolerate delayed or missed triggers.
 
-Drive is routed through the Pico. The Pico reads the two drive channels (CH2, CH3) from the receiver and re-creates the servo-style PWM signal (50 Hz, 1000-2000 µs) for the two drive ESCs using `machine.PWM`. This was changed from the original design, where the receiver was wired straight to the ESCs, because in that design the kill switch could only lock out the weapon and had no way to stop the wheels. With the Pico in the path, the emergency stop forces both ESCs to neutral (1500 µs).
+Drive is routed through the Pico. The Pico reads the two drive channels (CH2, CH3) from the receiver and re-creates the servo-style PWM signal (50 Hz, 1000-2000 µs) for the left and right motor inputs of the 4-in-1 ESC using `machine.PWM`. This was changed from the original design, where the receiver was wired straight to the ESC, because in that design the kill switch could only lock out the weapon and had no way to stop the wheels. With the Pico in the path, the emergency stop forces both motors to neutral (1500 µs).
 
-The tradeoff is that the Pico is now a single point of failure for driving, and the pass-through adds a few milliseconds of delay (the main loop runs every 5 ms). To cover a hung program, a hardware watchdog (`machine.WDT`, 2 s) resets the Pico, which stops the ESC pulses. The removable battery link is still the real power cut-off.
+The tradeoff is that the Pico is now a single point of failure for driving, and the pass-through adds a few milliseconds of delay (the main loop runs every 5 ms). To cover a hung program, a hardware watchdog (`machine.WDT`, 2 s) resets the Pico, which stops the pulses to the ESC. The removable battery link is still the real power cut-off.
 
 **Raspberry Pi 4B - Video**
 
@@ -54,7 +54,7 @@ The pneumatic system has a finite air supply. The Pico enforces a hard limit of 
 
 The Pico implements three emergency stop triggers:
 
-- **Kill switch (SwA/CH5):** Flipping the kill switch on puts the system into emergency stop within one loop (about 5 ms after the Pico sees the pulse). Both drive ESCs are commanded to neutral and a firing sequence in progress is aborted. To recover, the kill switch must be returned to OFF, and the stop clears after a 300 ms debounce.
+- **Kill switch (SwA/CH5):** Flipping the kill switch on puts the system into emergency stop within one loop (about 5 ms after the Pico sees the pulse). Both drive motors are commanded to neutral and a firing sequence in progress is aborted. To recover, the kill switch must be returned to OFF, and the stop clears after a 300 ms debounce.
 - **Signal loss:** If any of the four channels (CH2, CH3, CH5, CH6) goes more than 1000 ms without a valid PWM pulse, the Pico triggers emergency stop. This catches a dead receiver or a broken signal wire. It recovers automatically once all four signals have been good for 1000 ms and the kill switch is OFF.
 - **Startup interlock:** Drive is held at neutral for the first 3 seconds. If the kill switch is ON when the Pico boots, it starts in emergency stop and waits for the operator to turn it off.
 
@@ -62,8 +62,8 @@ In emergency stop, drive is held at neutral, the solenoids are held in their saf
 
 **Limits of the software stop (set these up on the hardware)**
 
-- **Transmitter off or out of range:** the FS-iA6B keeps sending pulses when it loses the transmitter, so the Pico cannot detect that by itself. Set the transmitter failsafe so CH5 goes to ON (kill) on signal loss. Then a lost transmitter looks like a kill switch flip.
-- **Pico crash or power loss:** the ESCs must stop when their signal pulses disappear. Test this on the bench with the wheels off the ground.
+- **Transmitter off or out of range:** the FS-iA6B keeps sending pulses when it loses the transmitter, so the Pico cannot detect that by itself. Set the transmitter failsafe so CH5 goes to ON (kill) on signal loss, and CH2/CH3 go to center (1500), not low throttle. Then a lost transmitter looks like a kill switch flip.
+- **Pico crash or power loss:** the ESC must stop the motors when its signal pulses disappear. Test this on the bench with the wheels off the ground.
 - **Exhaust valve:** it is normally closed, so "exhaust open" needs 12 V and a working Pico. A power loss closes it. The manual purge is the fallback.
 
 ---
@@ -92,8 +92,8 @@ The receiver script on the laptop monitors frame arrival time. If no frame arriv
 
 | Input | Channel | Function |
 |---|---|---|
-| Right stick up/down | CH2 | Drive A (through the Pico to ESC A) |
-| Left stick up/down | CH3 | Drive B (through the Pico to ESC B) |
+| Left stick up/down | CH2 | Left motor (through the Pico to the ESC) |
+| Right stick up/down | CH3 | Right motor (through the Pico to the ESC) |
 | SwA (top left, 2-pos) | CH5 | Kill switch - ON triggers emergency stop |
 | SwD (top right, 2-pos) | CH6 | Weapon trigger - edge-triggered, fires once per press |
 
@@ -101,16 +101,16 @@ The receiver script on the laptop monitors frame arrival time. If no frame arriv
 
 | Pico pin | Direction | Connects to |
 |---|---|---|
-| GP16 | in | Receiver CH2, through the level shifter |
-| GP17 | in | Receiver CH3, through the level shifter |
+| GP16 | in | Receiver CH2 (left motor), through the level shifter |
+| GP17 | in | Receiver CH3 (right motor), through the level shifter |
 | GP18 | in | Receiver CH5 (kill switch), through the level shifter |
 | GP19 | in | Receiver CH6 (weapon trigger), through the level shifter |
-| GP20 | out | ESC A signal wire (was on receiver CH2) |
-| GP21 | out | ESC B signal wire (was on receiver CH3) |
+| GP20 | out | ESC left motor signal input (was on receiver CH2) |
+| GP21 | out | ESC right motor signal input (was on receiver CH3) |
 | GP14 | out | Exhaust valve relay |
 | GP15 | out | Inlet valves relay |
 
-The receiver outputs 5 V and the Pico pins are 3.3 V only, so all four receiver channels go through the 4-channel level shifter. The ESC signal outputs are 3.3 V. Pico ground, receiver ground and ESC signal ground must be common.
+The receiver outputs 5 V and the Pico pins are 3.3 V only, so all four receiver channels go through the 4-channel level shifter. The ESC signal outputs are 3.3 V. Pico ground, receiver ground and ESC signal ground must be common. The wiring diagram is in [`hardware/WIRING.md`](hardware/WIRING.md).
 
 The weapon fires on the rising edge of SwD, not while held. Holding the trigger down does not fire repeatedly - the Pico detects the OFF→ON transition and fires once, then waits for the trigger to be released before it can fire again.
 
@@ -119,12 +119,14 @@ The weapon fires on the rising edge of SwD, not while held. Holding the trigger 
 ## Hardware
 
 - Raspberry Pi 4B (video streaming)
-- Raspberry Pi Pico W (weapon and safety control)
-- FlySky FS-iA6B RC receiver
-- Picamera2-compatible Pi camera
-- 2× solenoid valves (normally closed): main reservoir valve + piston valve
-- Pneumatic reservoir and plow mechanism
-- Drive ESCs (signal from the Pico W, GP20 and GP21)
+- Raspberry Pi Pico W (drive pass-through, weapon and safety control)
+- FlySky FS-i6X transmitter and FS-iA6B RC receiver
+- 4-channel bi-directional 5 V to 3.3 V level shifter (receiver CH2, CH3, CH5, CH6 to the Pico)
+- SEQURE 4-in-1 ESC (BLHeli_32, 70 A), two motor outputs used, signal from the Pico W on GP20 and GP21
+- 2× BA3520 650 Kv brushless drive motors
+- Fisheye Pi camera (Picamera2-compatible)
+- 3× solenoid valves (normally closed, 12 V): two inlet valves on GP15, one exhaust valve on GP14, switched through relays
+- Two pneumatic reservoirs, two cylinders and the plow mechanism
 
 ---
 
@@ -132,15 +134,15 @@ The weapon fires on the rising edge of SwD, not while held. Holding the trigger 
 
 **`temp_test.py`** - Reads CPU temperature from `/sys/class/thermal/thermal_zone0/temp` on the Pi 4B every second for 60 seconds and reports max and average. The safe operating limit is 85°C; the script warns at 80°C. This matters because the Pi 4B runs encoding and socket I/O simultaneously inside a robot with limited airflow - thermal throttling would drop the stream frame rate at the worst possible moment.
 
-**`weapon_latency_test.py`** - Runs on the Pico W and measures the time between the weapon trigger rising edge (SwD/CH6) and the physical solenoid response, detected via an interrupt on the main solenoid monitoring pin. Latency values under 200 ms are recorded; the target is under 50 ms. Reports min, max, and average across all activations during a 30-second window. The results from this test informed the final values in `pico_direct.py` - specifically `MAX_WEAPON_ACTIVATIONS = 17` and the solenoid timing constants.
+**`weapon_latency_test.py`** - Runs on the Pico W and measures the time between the weapon trigger rising edge (SwD/CH6) and the physical solenoid response, detected via an interrupt on the exhaust valve relay line (GP14, used as an input in this test only). Latency values under 200 ms are recorded; the target is under 50 ms. Reports min, max, and average across all activations during a 30-second window. The results from this test informed the final values in `pico_direct.py` - specifically `MAX_WEAPON_ACTIVATIONS = 17` and the solenoid timing constants.
 
 ---
 
 ## Setup and Deployment
 
-**Pico W (weapon controller)**
+**Pico W (drive, weapon and safety controller)**
 
-Flash MicroPython firmware onto the Pico W, then copy `pico_direct.py` to the device. The script runs automatically on boot.
+Rewire the drive signals first (see [`hardware/WIRING.md`](hardware/WIRING.md)). Flash MicroPython firmware onto the Pico W, then save `pico_direct.py` to the device as `main.py`. MicroPython only runs a file automatically on boot if it is named `main.py`.
 
 **Pi 4B (video streaming)**
 
