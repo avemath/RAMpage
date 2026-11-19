@@ -2,527 +2,488 @@
 RAMpage 30lb Combat Robot - Main Pico Code
 Team 22: Avery, Nick, Chris, Miles, Matthew
 
-Main controller for the Raspberry Pi Pico:
-- Direct Flysky RC to ESC connection for motor control
-- Reads weapon trigger and kill switch from FlySky receiver
-- Controls pneumatic weapon system with activation counter
+Main controller for the Raspberry Pi Pico W:
+- Drive pass-through: reads the two drive channels (CH2, CH3) from the FlySky
+  receiver and re-creates the PWM signal for the two drive ESCs. Because the
+  drive signal now goes THROUGH the Pico, the emergency stop can force both
+  ESCs to neutral.
+- Reads weapon trigger and kill switch from the FlySky receiver
+- Controls the pneumatic weapon system with an activation counter
+- Emergency stop (kill switch, lost receiver signal, startup interlock)
+
+WIRING (changed from the original "direct" version, see README):
+    Receiver CH2 -> level shifter -> GP16      Receiver CH5 -> level shifter -> GP18
+    Receiver CH3 -> level shifter -> GP17      Receiver CH6 -> level shifter -> GP19
+    GP20 -> ESC A signal (was receiver CH2)    GP21 -> ESC B signal (was receiver CH3)
+    Pico GND, receiver GND and ESC signal GND must all be connected together.
+
+THINGS THE CODE CANNOT DO FOR ME (must be set up on the hardware):
+1. Transmitter turned off / out of range: the iA6B receiver keeps sending
+   pulses when it loses the transmitter, so the Pico cannot see that kind of
+   signal loss by itself. In the transmitter failsafe menu, set CH5 to the ON
+   (kill) position so a lost transmitter looks like a kill switch flip.
+2. The Pico is now a single point of failure for driving. If this program
+   stops, the watchdog resets the Pico, its pins stop sending pulses, and the
+   ESCs must stop on "no signal". Bench test this with the wheels off the ground.
+3. The exhaust valve is normally closed, so "exhaust open" needs power. If the
+   Pico or the 12 V rail dies, the exhaust valve closes.
 
 MIT License
 """
 
 import machine
-from machine import Pin
+from machine import Pin, PWM
 import utime
 import sys
 
 # ======= PIN CONFIG =======
-# RC receiver pins - FlySky iA6B
+# RC receiver input pins - FlySky iA6B (5 V signals, through the level shifter)
+CH2_PIN = 16     # Drive channel A (right stick up/down)
+CH3_PIN = 17     # Drive channel B (left stick up/down)
 CH5_PIN = 18     # SwA - Kill switch (top left)
 CH6_PIN = 19     # SwD - Weapon trigger (top right)
 
+# Drive ESC output pins (3.3 V servo-style PWM made by the Pico)
+# GP20 and GP21 share one PWM slice, which is fine because both run at 50 Hz.
+ESC_A_PIN = 20   # Passes CH2 through
+ESC_B_PIN = 21   # Passes CH3 through
+
 # Solenoid pins - Normally Closed (NC) valves
-MAIN_SOLENOID_PIN = 14    # Reservoir relay (exhaust) 
-PISTON_SOLENOID_PIN = 15  # Pistons relay
+MAIN_SOLENOID_PIN = 14    # Exhaust valve relay (open when idle)
+PISTON_SOLENOID_PIN = 15  # Inlet valves relay (both reservoirs)
 
 # ======= CONSTANTS =======
-# RC signal constants - standard RC values
-PWM_MIN = 1000      # 1ms pulse (min)
-PWM_MAX = 2000      # 2ms pulse (max)
-PWM_CENTER = 1500   # 1.5ms pulse (center/neutral position)
+# RC signal constants - standard RC values (microseconds)
+PWM_MIN = 1000      # 1 ms pulse (min)
+PWM_MAX = 2000      # 2 ms pulse (max)
+PWM_CENTER = 1500   # 1.5 ms pulse (center/neutral position)
 
-# FlySky switch thresholds
+# Drive output
+ESC_PWM_FREQ = 50          # Hz - standard RC frame rate (one pulse every 20 ms)
+DRIVE_NEUTRAL_US = 1500    # Pulse that means "stop" for a reversible ESC.
+                           # NOTE: check this matches how the ESCs were calibrated.
+
+# FlySky switch threshold
 SWITCH_ON_THRESHOLD = 1700   # Above this value, switch is ON
-SWITCH_OFF_THRESHOLD = 1300  # Below this value, switch is OFF
 
-# System timing
-SIGNAL_TIMEOUT = 1000    # ms - time to wait before considering signal lost
-STARTUP_DELAY = 3000     # ms - time to wait during startup 
-KILL_SWITCH_DEBOUNCE = 300  # ms - debounce time for kill switch changes
+# System timing (ms)
+SIGNAL_TIMEOUT = 1000        # No valid pulse for this long = signal lost
+SIGNAL_RECOVERY_TIME = 1000  # Signals must be good this long before auto reset
+STARTUP_DELAY = 3000         # Wait at startup (drive held at neutral)
+KILL_SWITCH_DEBOUNCE = 300   # Minimum time in emergency stop before reset
+LOOP_DELAY = 5               # Main loop period
+STATUS_INTERVAL = 3000       # Time between status prints
 
-# Weapon system constants - updated values from weapon_latency_test.py testing results
+# Watchdog: resets the Pico if the main loop ever hangs for this long.
+# NOTE: once started it cannot be turned off. After I press Stop in Thonny the
+# Pico will reboot about 2 s later. Set USE_WATCHDOG = False for bench work.
+USE_WATCHDOG = True
+WATCHDOG_TIMEOUT = 2000      # ms
+
+# Weapon system constants - values from weapon_latency_test.py testing results
 MAX_WEAPON_ACTIVATIONS = 17          # Max weapon activations
-WEAPON_COOLDOWN = 500                # ms - cooldown between activations
-SOLENOID_ACTIVATION_TIME = 400       # ms - how long to keep solenoids open
-SOLENOID_SEQUENCE_DELAY = 50         # ms - delay between opening valves
+WEAPON_COOLDOWN = 500                # ms - wait after a shot finishes
+SOLENOID_ACTIVATION_TIME = 400       # ms - how long the inlets stay open
+SOLENOID_SEQUENCE_DELAY = 50         # ms - delay between valve steps
+
+# Weapon firing steps (the firing sequence is a small state machine so the
+# main loop never stops to wait, and the kill switch works mid-shot)
+WEAPON_IDLE = 0      # Exhaust open, inlets closed
+WEAPON_HOME = 1      # Exhaust open for 50 ms (plow home)
+WEAPON_DWELL = 2     # Exhaust closed, waiting 50 ms
+WEAPON_EXTEND = 3    # Inlets open for 400 ms (plow out)
 
 # ======= GLOBAL VARIABLES =======
-# RC signal tracking
-ch5_pulse_width = 0    # Kill switch
-ch6_pulse_width = 0    # Weapon trigger
-ch5_last_update = 0    # Last time we received a kill switch signal
-ch6_last_update = 0    # Last time we received a weapon trigger signal
-
 # System state
-startup_time = 0
 emergency_stop = False
-emergency_cause = "none"  # Can be "none", "kill_switch", "signal_loss", "startup"
-kill_switch_last_change = 0
-signal_loss_time = 0
+emergency_cause = "none"   # "none", "kill_switch", "signal_loss", "startup"
+emergency_time = 0         # When the emergency stop started
+last_signal_loss = 0       # Last time any channel was missing
 
 # Weapon state
+weapon_state = WEAPON_IDLE
+weapon_state_start = 0     # When the current firing step started
 weapon_activations = 0     # Number of times weapon has been activated
 weapon_cooldown_end = 0    # Time when weapon can be activated again
 weapon_depleted = False    # Whether we've hit max activations
-plow_active = False        # Whether plow is currently active
-weapon_trigger_last_state = False  # For edge detection
+# Starts True so the trigger has to be seen OFF before the first shot.
+# (If SwD is already ON at power-up, nothing fires.)
+weapon_trigger_last_state = True
+
+led_state = -1             # Last value written to the LED
 
 # ======= HARDWARE INITIALIZATION =======
 print("\n===== RAMpage Combat Robot - Main Pico Code =====")
 
-# Set up LED (for status indication)
-led = Pin(25, Pin.OUT)
-led.value(0)  # Start with LED off
+# Status LED. "LED" works on both the Pico and the Pico W
+# (on the Pico W the LED is on the wireless chip, not on GP25).
+# https://docs.micropython.org/en/latest/rp2/quickref.html
+led = Pin("LED", Pin.OUT)
+led.value(0)
 
-# Initialize solenoids
-solenoid_active = 0  # Active-low
+# Drive ESC outputs - start at neutral before anything else happens
+# https://docs.micropython.org/en/latest/library/machine.PWM.html
+try:
+    esc_a = PWM(Pin(ESC_A_PIN))
+    esc_b = PWM(Pin(ESC_B_PIN))
+    esc_a.freq(ESC_PWM_FREQ)
+    esc_b.freq(ESC_PWM_FREQ)
+    esc_a.duty_ns(DRIVE_NEUTRAL_US * 1000)
+    esc_b.duty_ns(DRIVE_NEUTRAL_US * 1000)
+    print(f"Drive ESC outputs on GP{ESC_A_PIN} and GP{ESC_B_PIN} (neutral)")
+except Exception as e:
+    print(f"Drive output setup failed: {e}")
+    sys.exit(1)
+
+# Solenoids
+solenoid_active = 0  # Active-low relays
 try:
     main_solenoid = Pin(MAIN_SOLENOID_PIN, Pin.OUT)
     piston_solenoid = Pin(PISTON_SOLENOID_PIN, Pin.OUT)
-    
-    main_solenoid.value(solenoid_active)          # Initialize exhaust relay to active state (open)
-    piston_solenoid.value(not solenoid_active)    # Initialize pistons relay to inactive state (closed)
-    
+
+    main_solenoid.value(solenoid_active)          # Exhaust open
+    piston_solenoid.value(not solenoid_active)    # Inlets closed
+
     print(f"Solenoids initialized on pins {MAIN_SOLENOID_PIN} and {PISTON_SOLENOID_PIN}")
 except Exception as e:
     print(f"Solenoid initialization failed: {e}")
-    main_solenoid = piston_solenoid = None
     sys.exit(1)
 
-# ======= RC RECEIVER INTERRUPT HANDLERS =======
-# Variables for pulse timing
-ch5_pulse_start = 0
-ch6_pulse_start = 0
 
-def ch5_handler(pin):
-     """
-    Interrupt handler for CH5 (kill switch)
+# ======= RC RECEIVER INPUT =======
+class RCChannel:
+    """
+    Measures the pulse width of one RC receiver channel using an interrupt.
 
-    Uses edge detection to measure PWM pulse width from RC receiver.
-    Rising edge starts the timer, falling edge calculates width.
-    Technique inspired by RC decoder implementations for microcontrollers.
-    
+    Rising edge starts the timer, falling edge calculates the width.
+    The handler only stores integers, which keeps it safe to run as an
+    interrupt (no memory allocation).
+
     Sources:
     https://docs.micropython.org/en/latest/library/machine.Pin.html#machine.Pin.irq
     https://docs.micropython.org/en/latest/reference/isr_rules.html#writing-interrupt-handlers
     """
-    global ch5_pulse_start, ch5_pulse_width, ch5_last_update
-    now = utime.ticks_us()
-    if pin.value():  # Rising edge
-        ch5_pulse_start = now
-    else:  # Falling edge
-        if ch5_pulse_start > 0:
-            width = utime.ticks_diff(now, ch5_pulse_start)
-            if 900 < width < 2100:  # Valid pulse range
-                ch5_pulse_width = width
-                ch5_last_update = utime.ticks_ms()
 
-def ch6_handler(pin):
-    """
-    Interrupt handler for CH6 (weapon trigger)
-    
-    Uses edge detection to measure PWM pulse width from RC receiver.
-    Rising edge starts the timer, falling edge calculates width.
-    Used MicroPython IRQ documentation for details on interrupt handling.
-    """
-    global ch6_pulse_start, ch6_pulse_width, ch6_last_update
-    now = utime.ticks_us()
-    if pin.value():  # Rising edge
-        ch6_pulse_start = now
-    else:  # Falling edge
-        if ch6_pulse_start > 0:
-            width = utime.ticks_diff(now, ch6_pulse_start)
-            if 900 < width < 2100:  # Valid pulse range
-                ch6_pulse_width = width
-                ch6_last_update = utime.ticks_ms()
+    def __init__(self, pin_number):
+        self.pulse_start = 0
+        self.pulse_width = 0     # Last valid pulse width in microseconds
+        self.last_update = 0     # ticks_ms() of the last valid pulse
+        self.seen = False        # True once at least one valid pulse arrived
+        self.pin = Pin(pin_number, Pin.IN)
+        self.pin.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=self.edge_handler)
 
-# Set up the interrupt handlers
+    def edge_handler(self, pin):
+        now = utime.ticks_us()
+        if pin.value():  # Rising edge
+            self.pulse_start = now
+        else:  # Falling edge
+            if self.pulse_start > 0:
+                width = utime.ticks_diff(now, self.pulse_start)
+                if 900 < width < 2100:  # Valid pulse range
+                    self.pulse_width = width
+                    self.last_update = utime.ticks_ms()
+                    self.seen = True
+
+    def lost(self, now):
+        """True if this channel has no valid pulse within SIGNAL_TIMEOUT."""
+        if not self.seen:
+            return True
+        return utime.ticks_diff(now, self.last_update) > SIGNAL_TIMEOUT
+
+    def switch_on(self):
+        """True if this channel is a switch in the ON position."""
+        return self.pulse_width > SWITCH_ON_THRESHOLD
+
+
 try:
-    # Using Pin.IRQ approach as shown in the MicroPython docs
-    # https://docs.micropython.org/en/latest/library/machine.Pin.html#machine.Pin.irq
-    ch5_pin = Pin(CH5_PIN, Pin.IN)
-    ch6_pin = Pin(CH6_PIN, Pin.IN)
-    
-    ch5_pin.irq(trigger=machine.Pin.IRQ_RISING | machine.Pin.IRQ_FALLING, handler=ch5_handler)
-    ch6_pin.irq(trigger=machine.Pin.IRQ_RISING | machine.Pin.IRQ_FALLING, handler=ch6_handler)
-    
-    print(f"RC receiver interrupts configured for kill switch (GP{CH5_PIN}) and weapon trigger (GP{CH6_PIN})")
+    ch2 = RCChannel(CH2_PIN)   # Drive A
+    ch3 = RCChannel(CH3_PIN)   # Drive B
+    ch5 = RCChannel(CH5_PIN)   # Kill switch
+    ch6 = RCChannel(CH6_PIN)   # Weapon trigger
+    print(f"RC inputs: drive GP{CH2_PIN}/GP{CH3_PIN}, kill GP{CH5_PIN}, weapon GP{CH6_PIN}")
 except Exception as e:
     print(f"RC interrupt setup failed: {e}")
     sys.exit(1)
 
+
 # ======= HELPER FUNCTIONS =======
-def read_rc_switch(pulse_width, last_update):
-    
-    """
-    Read the state of an RC switch channel.
-    Signal bounds based on FlySky testing.
+def any_signal_lost(now):
+    """True if any of the four receiver channels has stopped sending pulses."""
+    return ch2.lost(now) or ch3.lost(now) or ch5.lost(now) or ch6.lost(now)
 
-    Returns (switch_on, signal_lost) where:
-    - switch_on: True if switch is ON, False if OFF or MIDDLE
-    - signal_lost: True if we haven't received a signal recently
-    """
-    now = utime.ticks_ms()
-    
-    # Check if we have a recent signal
-    if utime.ticks_diff(now, last_update) > SIGNAL_TIMEOUT:
-        # During initial startup, don't report signal loss
-        if utime.ticks_diff(now, startup_time) < STARTUP_DELAY:
-            return False, False  # Default to OFF, no signal loss
-        return False, True  # Default to OFF, signal lost
-    
-    # For switches, using explicit thresholds for better reliability
-    if pulse_width > SWITCH_ON_THRESHOLD:
-        return True, False  # ON, signal good
-    else:
-        return False, False  # OFF or MIDDLE, signal good
 
-def activate_weapon():
+def set_drive(a_us, b_us):
+    """Send pulse widths (microseconds) to the two drive ESCs, limited to 1000-2000."""
+    a_us = min(max(a_us, PWM_MIN), PWM_MAX)
+    b_us = min(max(b_us, PWM_MIN), PWM_MAX)
+    esc_a.duty_ns(a_us * 1000)
+    esc_b.duty_ns(b_us * 1000)
+
+
+def drive_neutral():
+    """Command both drive ESCs to stop."""
+    esc_a.duty_ns(DRIVE_NEUTRAL_US * 1000)
+    esc_b.duty_ns(DRIVE_NEUTRAL_US * 1000)
+
+
+def solenoids_safe():
+    """Put the valves in the safe state: inlets closed, exhaust open."""
+    piston_solenoid.value(not solenoid_active)
+    main_solenoid.value(solenoid_active)
+
+
+def set_led(on):
+    """Only write to the LED when it changes (the Pico W LED write is slow)."""
+    global led_state
+    on = 1 if on else 0
+    if on != led_state:
+        led.value(on)
+        led_state = on
+
+
+# ======= WEAPON =======
+def start_weapon(now):
     """
-    This function sequences the solenoid valves for proper firing of the pneumatic plow system:
-    1. Open main valve (exhaust - to pull in plow)
-    2. Short delay to build pressure
-    3. Close main valve
-    4. Short dwell time
-    5. Open piston valves to actuate the plow
-    6. Keep valves open for activation time
-    7. Close piston valves
-    8. Open main valve to vent
-    
-    Returns True if activation was successful, False otherwise.
+    Start one firing sequence. Returns True if the sequence started.
+
+    The sequence itself is stepped by update_weapon():
+    1. Exhaust open, 50 ms (plow home)
+    2. Exhaust closes, 50 ms dwell
+    3. Inlets open, 400 ms (plow out)
+    4. Inlets close, exhaust reopens (plow vents and retracts)
     """
-    global weapon_activations, weapon_cooldown_end, weapon_depleted, plow_active
-    
-    # Don't activate if in emergency stop
+    global weapon_state, weapon_state_start, weapon_activations, weapon_depleted
+
     if emergency_stop:
         print("Cannot activate weapon - emergency stop active")
         return False
-    
-    # Don't activate if in cooldown period
-    now = utime.ticks_ms()
-    if now < weapon_cooldown_end:
-        print("Weapon in cooldown - wait before activating again")
-        return False
-    
-    # Don't activate if weapon is depleted
+    if weapon_state != WEAPON_IDLE:
+        return False  # Already firing
     if weapon_depleted:
         print("Weapon depleted - maximum activations reached")
         return False
-    
-    # Check if solenoids are available
-    if main_solenoid is None or piston_solenoid is None:
-        print("Solenoids not initialized - can't activate weapon")
+    if utime.ticks_diff(now, weapon_cooldown_end) < 0:
+        print("Weapon in cooldown - wait before activating again")
         return False
-    
-    try:
-        # Increment activation counter
-        weapon_activations += 1
-        print(f"Activating weapon ({weapon_activations}/{MAX_WEAPON_ACTIVATIONS})")
-        
-        # Set cooldown end time
-        weapon_cooldown_end = utime.ticks_add(now, WEAPON_COOLDOWN)
-        
-        # Check if we've reached max activations
-        if weapon_activations >= MAX_WEAPON_ACTIVATIONS:
-            weapon_depleted = True
-            print("WARNING: Weapon system depleted")
-        
-        # Show activation with LED
-        plow_active = True
-        led.value(1)
-        
-        # Activate solenoids in sequence
-        # 1. Open main valve to allow air flow (exhaust)
-        main_solenoid.value(solenoid_active)
-        
-        # 2. Wait for pressure to build
-        utime.sleep_ms(SOLENOID_SEQUENCE_DELAY)
-        
-        # 3. Close main valve
+
+    weapon_activations += 1
+    print(f"Activating weapon ({weapon_activations}/{MAX_WEAPON_ACTIVATIONS})")
+    if weapon_activations >= MAX_WEAPON_ACTIVATIONS:
+        weapon_depleted = True
+        print("WARNING: Weapon system depleted")
+
+    # Step 1: exhaust open (plow home)
+    main_solenoid.value(solenoid_active)
+    weapon_state = WEAPON_HOME
+    weapon_state_start = now
+    return True
+
+
+def update_weapon(now):
+    """Move the firing sequence to its next step when the step time is up."""
+    global weapon_state, weapon_state_start, weapon_cooldown_end
+
+    if weapon_state == WEAPON_IDLE:
+        return
+
+    elapsed = utime.ticks_diff(now, weapon_state_start)
+
+    if weapon_state == WEAPON_HOME and elapsed >= SOLENOID_SEQUENCE_DELAY:
+        # Step 2: close exhaust, dwell
         main_solenoid.value(not solenoid_active)
-        
-        # 4. Dweel time
-        utime.sleep_ms(SOLENOID_SEQUENCE_DELAY)
-        
-        # 5. Open piston valves to extend plow
+        weapon_state = WEAPON_DWELL
+        weapon_state_start = now
+
+    elif weapon_state == WEAPON_DWELL and elapsed >= SOLENOID_SEQUENCE_DELAY:
+        # Step 3: open inlets to extend the plow
         piston_solenoid.value(solenoid_active)
-        
-        # 6. Keep valves open for activation time to fully extend
-        utime.sleep_ms(SOLENOID_ACTIVATION_TIME)
-        
-        # 7. Close valves to complete activation
-        piston_solenoid.value(not solenoid_active)
-        
-        # 8. Re-open main valve (exhaust)
-        main_solenoid.value(solenoid_active)
-        
-        # Reset flags
-        plow_active = False
-        led.value(0)
-        
-        return True
-    except Exception as e:
-        print(f"Weapon activation failed: {e}")
-        # Make sure pistons solenoid is closed & main solenoid is open in case of error
-        try:
-            main_solenoid.value(solenoid_active)
-            piston_solenoid.value(not solenoid_active)
-            plow_active = False
-            led.value(0)
-        except:
-            pass
-        return False
+        weapon_state = WEAPON_EXTEND
+        weapon_state_start = now
 
-def trigger_emergency_stop(cause="unknown"):
+    elif weapon_state == WEAPON_EXTEND and elapsed >= SOLENOID_ACTIVATION_TIME:
+        # Step 4: close inlets, reopen exhaust
+        solenoids_safe()
+        weapon_state = WEAPON_IDLE
+        weapon_cooldown_end = utime.ticks_add(now, WEAPON_COOLDOWN)
+
+
+def abort_weapon():
+    """Stop a firing sequence right away and vent."""
+    global weapon_state
+    solenoids_safe()
+    weapon_state = WEAPON_IDLE
+
+
+# ======= EMERGENCY STOP =======
+def trigger_emergency_stop(cause, now):
     """
-    Activate emergency stop by cutting power to the Flysky receiver.
+    Emergency stop: drive ESCs to neutral, inlets closed, exhaust open.
 
-    Removing signal to ESCs causes them to enter failsafe mode.
-    This approach is recommended by the RioBotz team and others 
-    in combat robotics as a reliable safety mechanism.
+    This is a software stop. The removable link on the battery is still the
+    real power cut-off, which follows the RioBotz advice that the main
+    power switch must not depend on electronics.
     Source: https://www.riobotz.com/riobotz_combot_tutorial.pdf
     """
-    global emergency_stop, emergency_cause, kill_switch_last_change
-    
+    global emergency_stop, emergency_cause, emergency_time
+
     if emergency_stop:
         return  # Already in emergency stop
-    
-    print(f"EMERGENCY STOP ACTIVATED: {cause}")
+
+    # Make everything safe FIRST, then do the bookkeeping
+    drive_neutral()
+    abort_weapon()
+
     emergency_stop = True
     emergency_cause = cause
-    kill_switch_last_change = utime.ticks_ms()
-    
-    # Reset solenoids
-    if main_solenoid:
-        main_solenoid.value(solenoid_active)
-    if piston_solenoid:
-        piston_solenoid.value(not solenoid_active)
-    
-    # Blink LED rapidly to indicate emergency stop
-    for _ in range(10):
-        led.value(1)
-        utime.sleep_ms(50)
-        led.value(0)
-        utime.sleep_ms(50)
+    emergency_time = now
+    print(f"EMERGENCY STOP ACTIVATED: {cause}")
 
-def check_emergency_stop_reset():
+
+def can_reset_emergency_stop(now, kill_switch_on, signal_lost):
     """
-    Check if we can reset from emergency stop.
-    Returns True if emergency stop can be reset, False otherwise.
+    Returns True if it is safe to leave emergency stop.
+
+    For every cause the kill switch must be OFF and all four channels must
+    be sending pulses. After a signal loss the signals also have to stay
+    good for SIGNAL_RECOVERY_TIME.
     """
-    global emergency_stop, emergency_cause
-    
-    # Only try to reset if we're in emergency stop
-    if not emergency_stop:
+    if kill_switch_on or signal_lost:
         return False
-    
-    now = utime.ticks_ms()
-    
-    # Get kill switch state
-    kill_switch_on, kill_lost = read_rc_switch(ch5_pulse_width, ch5_last_update)
-    
-    # Reset logic
-    if emergency_cause == "kill_switch":
-        # If kill switch caused the emergency, it must be OFF to reset
-        if not kill_switch_on and not kill_lost:
-            # Debounce edge case
-            if utime.ticks_diff(now, kill_switch_last_change) > KILL_SWITCH_DEBOUNCE:
-                print("Emergency stop reset (kill switch now OFF)")
-                return True
-    
-    elif emergency_cause == "signal_loss":
-        # If signal loss caused the emergency, we just need signals back
-        kill_switch_on, kill_lost = read_rc_switch(ch5_pulse_width, ch5_last_update)
-        weapon_trigger_on, weapon_lost = read_rc_switch(ch6_pulse_width, ch6_last_update)
-        
-        signal_lost = kill_lost or weapon_lost
-        if not signal_lost:
-            # Check signals are stable
-            if utime.ticks_diff(now, signal_loss_time) > 1000:
-                print("Emergency stop reset (signal restored)")
-                return True
-    
-    else:
-        # For other causes, just check kill switch is OFF and signal is good
-        if not kill_switch_on and not kill_lost:
-            if utime.ticks_diff(now, kill_switch_last_change) > KILL_SWITCH_DEBOUNCE:
-                print("Emergency stop reset (generic)")
-                return True
-    
-    return False
+    if utime.ticks_diff(now, emergency_time) < KILL_SWITCH_DEBOUNCE:
+        return False
+    if emergency_cause == "signal_loss":
+        if utime.ticks_diff(now, last_signal_loss) < SIGNAL_RECOVERY_TIME:
+            return False
+    return True
+
 
 def reset_emergency_stop():
-    """Reset emergency stop"""
+    """Leave emergency stop."""
     global emergency_stop, emergency_cause
-    
+    print(f"Emergency stop reset (was: {emergency_cause}) - system ready")
     emergency_stop = False
     emergency_cause = "none"
-    
-    # Blink LED to confirm reset
-    for _ in range(2):
-        led.value(1)
-        utime.sleep_ms(200)
-        led.value(0)
-        utime.sleep_ms(200)
-    
-    print("Emergency stop reset - system ready")
 
-def print_status():
+
+def print_status(now):
     """Print current status info to console"""
-    
-    # Get switch states
-    kill_switch_on, kill_lost = read_rc_switch(ch5_pulse_width, ch5_last_update)
-    weapon_trigger_on, weapon_lost = read_rc_switch(ch6_pulse_width, ch6_last_update)
-    
-    # Print status info
     print("\n----- STATUS UPDATE -----")
-    print(f"Kill switch: {'ON' if kill_switch_on else 'OFF'}")
-    print(f"Weapon trigger: {'ON' if weapon_trigger_on else 'OFF'}")
+    print(f"Kill switch: {'ON' if ch5.switch_on() else 'OFF'}")
+    print(f"Weapon trigger: {'ON' if ch6.switch_on() else 'OFF'}")
     print(f"Emergency stop: {'ACTIVE' if emergency_stop else 'Inactive'}")
     print(f"Emergency cause: {emergency_cause}")
-    print(f"Signal status: {'LOST' if kill_lost or weapon_lost else 'Good'}")
+    print(f"Signal status: {'LOST' if any_signal_lost(now) else 'Good'}")
     print(f"Weapon activations: {weapon_activations}/{MAX_WEAPON_ACTIVATIONS}" +
           (" (DEPLETED)" if weapon_depleted else ""))
-    print(f"Raw values - Kill:{ch5_pulse_width} Weapon:{ch6_pulse_width}")
+    print(f"Raw values - Drive:{ch2.pulse_width}/{ch3.pulse_width} "
+          f"Kill:{ch5.pulse_width} Weapon:{ch6.pulse_width}")
+
 
 # ======= MAIN FUNCTION =======
 def main():
     """
-    Main function that runs the weapon control system.
-    Monitors the FlySky switches and controls the pneumatic weapon.
+    Main loop. Nothing in here waits longer than LOOP_DELAY, so the drive
+    pass-through and the kill switch are checked about every 5 ms.
     """
-    global startup_time, emergency_stop, weapon_trigger_last_state
-    global kill_switch_last_change, signal_loss_time
-    
-    # Record startup time
-    startup_time = utime.ticks_ms()
-    kill_switch_last_change = startup_time
-    signal_loss_time = startup_time
-    
-    print("\n===== STARTING WEAPON CONTROL SYSTEM =====")
-    print("Waiting for RC signals to stabilize...")
-    
-    # Initial LED pattern to show we're starting
-    for _ in range(3):
-        led.value(1)
-        utime.sleep_ms(200)
-        led.value(0)
-        utime.sleep_ms(200)
-    
-    # Startup and warmup delay
-    wait_start = utime.ticks_ms()
-    while utime.ticks_diff(utime.ticks_ms(), wait_start) < STARTUP_DELAY:
-        # Blink LED during startup
-        led.value((utime.ticks_ms() % 500) < 250)
-        
-        # Check for kill switch during startup
-        kill_switch_on, _ = read_rc_switch(ch5_pulse_width, ch5_last_update)
-        if kill_switch_on:
-            print("Kill switch is ON during startup - must turn OFF to operate")
-            trigger_emergency_stop("startup")
-            break
-        
-        utime.sleep_ms(100)
-    
+    global weapon_trigger_last_state, last_signal_loss, weapon_cooldown_end
+
+    print("\n===== STARTING CONTROL SYSTEM =====")
+    print("Waiting for RC signals to stabilize (drive held at neutral)...")
+
+    # Startup delay. Drive stays at neutral, which also lets the ESCs arm.
+    startup_start = utime.ticks_ms()
+    while utime.ticks_diff(utime.ticks_ms(), startup_start) < STARTUP_DELAY:
+        set_led((utime.ticks_ms() % 500) < 250)
+        utime.sleep_ms(50)
+
+    now = utime.ticks_ms()
+    last_signal_loss = now
+    weapon_cooldown_end = now
+    last_status_time = now
+
+    # Startup interlock: kill switch ON at boot means start in emergency stop
+    if ch5.seen and ch5.switch_on():
+        print("Kill switch is ON during startup - must turn OFF to operate")
+        trigger_emergency_stop("startup", now)
+
     print("System initialized")
     print(f"Maximum weapon activations: {MAX_WEAPON_ACTIVATIONS}")
-    print("To RESET emergency stop: Simply turn the kill switch OFF")
-    
-    # Status display interval
-    status_interval = 3000  # 3s between status prints
-    last_status_time = 0
-    
-    # Main loop
+    print("To RESET emergency stop: turn the kill switch OFF")
+
+    # https://docs.micropython.org/en/latest/library/machine.WDT.html
+    wdt = machine.WDT(timeout=WATCHDOG_TIMEOUT) if USE_WATCHDOG else None
+
     try:
         while True:
             now = utime.ticks_ms()
-            
-            # Print status periodically
-            if utime.ticks_diff(now, last_status_time) > status_interval:
-                print_status()
+            if wdt:
+                wdt.feed()
+
+            if utime.ticks_diff(now, last_status_time) > STATUS_INTERVAL:
+                print_status(now)
                 last_status_time = now
-            
+
             # Read RC channels
-            kill_switch_on, kill_lost = read_rc_switch(ch5_pulse_width, ch5_last_update)
-            weapon_trigger_on, weapon_lost = read_rc_switch(ch6_pulse_width, ch6_last_update)
-            
-            # Check for kill switch activation
-            if kill_switch_on and not emergency_stop:
-                print("Kill switch activated")
-                trigger_emergency_stop("kill_switch")
-            
-            # Check for signal loss
-            if (kill_lost or weapon_lost) and not emergency_stop:
-                print("Signal lost - emergency stop")
-                signal_loss_time = now
-                trigger_emergency_stop("signal_loss")
-            
-            # Check if we can reset from emergency stop
-            if emergency_stop and check_emergency_stop_reset():
+            kill_switch_on = ch5.switch_on()
+            weapon_trigger_on = ch6.switch_on()
+            signal_lost = any_signal_lost(now)
+            if signal_lost:
+                last_signal_loss = now
+
+            # Emergency stop checks
+            if not emergency_stop:
+                if signal_lost:
+                    trigger_emergency_stop("signal_loss", now)
+                elif kill_switch_on:
+                    trigger_emergency_stop("kill_switch", now)
+            elif can_reset_emergency_stop(now, kill_switch_on, signal_lost):
                 reset_emergency_stop()
-            
-            # Skip the rest if in emergency stop
+
             if emergency_stop:
-                # Blink LED to indicate emergency state
-                led.value(1 if (now % 500) < 250 else 0)
-                utime.sleep_ms(10)
+                # Keep commanding the safe state every loop
+                drive_neutral()
+                solenoids_safe()
+                # Keep tracking the trigger so a switch that was flipped ON
+                # during the stop does not fire the weapon when the stop clears
+                weapon_trigger_last_state = weapon_trigger_on
+                set_led((now % 200) < 100)   # Fast blink = emergency stop
+                utime.sleep_ms(LOOP_DELAY)
                 continue
-            
-            # Weapon activation
-            if weapon_trigger_on and not weapon_trigger_last_state and not plow_active and not weapon_depleted:
-                activate_weapon()
-            
-            # Update last weapon trigger state for edge detection
+
+            # Drive pass-through: copy the stick pulses to the ESCs
+            set_drive(ch2.pulse_width, ch3.pulse_width)
+
+            # Weapon: fire once on the OFF -> ON edge of the trigger
+            if weapon_trigger_on and not weapon_trigger_last_state:
+                start_weapon(now)
             weapon_trigger_last_state = weapon_trigger_on
-            
-            # LED status - blink pattern based on system state
-            if weapon_depleted:
-                # Rapid double blink when depleted
-                led.value(1 if (now % 1000) < 100 or (now % 1000) > 200 and (now % 1000) < 300 else 0)
-            elif plow_active:
-                # Solid when plow is active
-                led.value(1)
+            update_weapon(now)
+
+            # LED status
+            if weapon_state != WEAPON_IDLE:
+                set_led(1)                                   # Solid = firing
+            elif weapon_depleted:
+                phase = now % 1000
+                set_led(phase < 100 or 200 < phase < 300)    # Double blink = depleted
             else:
-                # Slow pulse when idle and ready
-                led.value(1 if (now % 2000) < 500 else 0)
-            
-            # Short delay to prevent tight loop
-            utime.sleep_ms(20)
-            
+                set_led((now % 2000) < 500)                  # Slow pulse = ready
+
+            utime.sleep_ms(LOOP_DELAY)
+
     except KeyboardInterrupt:
         print("\nControl system terminated by user")
     except Exception as e:
         print(f"\nUnexpected error: {e}")
-        import sys
         sys.print_exception(e)
     finally:
-        # Clean up
-        print("\nShutting down...")
-        
-        # Reset solenoids
-        if main_solenoid:
-            main_solenoid.value(solenoid_active)
-        if piston_solenoid:
-            piston_solenoid.value(not solenoid_active)
-            
+        # Leave everything safe. If the watchdog is on, the Pico reboots
+        # about 2 s after this because nothing feeds it anymore.
+        drive_neutral()
+        solenoids_safe()
         led.value(0)
-        print("System stopped")
+        print("System stopped - drive neutral, solenoids safe")
+
 
 # Run the program
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"Fatal error: {e}")
-        import sys
-        sys.print_exception(e)
-        
-        # Emergency cleanup
-        try:
-            if 'main_solenoid' in globals() and main_solenoid is not None:
-                main_solenoid.value(solenoid_active)
-            if 'piston_solenoid' in globals() and piston_solenoid is not None:
-                piston_solenoid.value(not solenoid_active)
-            if 'led' in globals() and led is not None:
-                led.value(0)
-        except:
-            pass
+    main()

@@ -37,7 +37,7 @@ connected = False                 # Whether we're receiving video
 last_frame_time = 0               # Time of last received frame
 
 def parse_arguments():
-     """
+    """
     Parse command line arguments using argparse
 
     Source:
@@ -85,7 +85,7 @@ def create_socket(port):
         return None
 
 def create_window(fullscreen=False):
-   """
+    """
     Create OpenCV window for display
 
     Creates a resizable window w/ optional fullscreen mode.
@@ -104,7 +104,7 @@ def create_window(fullscreen=False):
     return fullscreen
 
 def create_no_signal_frame():
-     """
+    """
     Create a frame to display when no video signal is received
 
     Uses OpenCV drawing + NumPy zeroed frame to generate a black frame with "NO SIGNAL" text.
