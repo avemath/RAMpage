@@ -10,11 +10,13 @@ The core engineering challenge is coordinating two independent controllers in re
 
 The system is split across two controllers, each responsible for what it does best.
 
-**Raspberry Pi Pico W - Weapon and Safety**
+**Raspberry Pi Pico W - Drive Pass-Through, Weapon and Safety**
 
 The Pico W runs the weapon control loop. It reads PWM signals from the FlySky FS-iA6B receiver using hardware interrupts, sequences the pneumatic solenoid valves, enforces the activation limit and cooldown, and handles emergency stop logic. The Pico is the right choice here because it has deterministic real-time behavior - there's no Linux scheduler adding jitter to interrupt handlers, and MicroPython's `machine.Pin.irq` fires on every edge with microsecond-resolution timestamps. The weapon system cannot tolerate delayed or missed triggers.
 
-Drive motors connect directly from the RC receiver to the ESCs - the Pico does not sit in that path. This means drive control has zero additional latency and no single point of failure through the microcontroller.
+Drive is routed through the Pico. The Pico reads the two drive channels (CH2, CH3) from the receiver and re-creates the servo-style PWM signal (50 Hz, 1000-2000 µs) for the two drive ESCs using `machine.PWM`. This was changed from the original design, where the receiver was wired straight to the ESCs, because in that design the kill switch could only lock out the weapon and had no way to stop the wheels. With the Pico in the path, the emergency stop forces both ESCs to neutral (1500 µs).
+
+The tradeoff is that the Pico is now a single point of failure for driving, and the pass-through adds a few milliseconds of delay (the main loop runs every 5 ms). To cover a hung program, a hardware watchdog (`machine.WDT`, 2 s) resets the Pico, which stops the ESC pulses. The removable battery link is still the real power cut-off.
 
 **Raspberry Pi 4B - Video**
 
@@ -46,17 +48,23 @@ Each activation follows a fixed valve sequence:
 
 **Activation Limits**
 
-The pneumatic system has a finite air supply. The Pico enforces a hard limit of **17 activations** in firmware. The team's air analysis found that only about the first **six** cycles deliver more than 30 lbf before reservoir pressure drops too far (predicted five, measured six); later cycles still fire, with less force. After 17 fires, the weapon is locked out and the LED pattern switches to a rapid double-blink. A 500 ms cooldown is enforced between each activation to prevent valve damage from rapid cycling.
+The pneumatic system has a finite air supply. The Pico enforces a hard limit of **17 activations** in firmware. The team's air analysis found that only about the first **six** cycles deliver more than 30 lbf before reservoir pressure drops too far (predicted five, measured six); later cycles still fire, with less force. After 17 fires, the weapon is locked out and the LED pattern switches to a rapid double-blink. A 500 ms cooldown after each firing sequence finishes is enforced to prevent valve damage from rapid cycling.
 
 **Safety Logic**
 
 The Pico implements three emergency stop triggers:
 
-- **Kill switch (SwA/CH5):** Flipping the kill switch on puts the system into emergency stop immediately. The ESCs enter failsafe mode, cutting drive power. To recover, the kill switch must be returned to OFF, at which point the Pico resets after a 300 ms debounce.
-- **Signal loss:** If either CH5 or CH6 goes more than 1000 ms without a valid PWM pulse, the Pico treats this as a lost transmitter and triggers emergency stop. It recovers automatically once both signals return.
-- **Startup interlock:** If the kill switch is ON when the Pico boots, it enters emergency stop immediately and waits for the operator to turn it off before allowing any operation.
+- **Kill switch (SwA/CH5):** Flipping the kill switch on puts the system into emergency stop within one loop (about 5 ms after the Pico sees the pulse). Both drive ESCs are commanded to neutral and a firing sequence in progress is aborted. To recover, the kill switch must be returned to OFF, and the stop clears after a 300 ms debounce.
+- **Signal loss:** If any of the four channels (CH2, CH3, CH5, CH6) goes more than 1000 ms without a valid PWM pulse, the Pico triggers emergency stop. This catches a dead receiver or a broken signal wire. It recovers automatically once all four signals have been good for 1000 ms and the kill switch is OFF.
+- **Startup interlock:** Drive is held at neutral for the first 3 seconds. If the kill switch is ON when the Pico boots, it starts in emergency stop and waits for the operator to turn it off.
 
-In emergency stop, all solenoids are reset to their safe state (exhaust open, inlets closed), and the LED blinks rapidly to indicate the condition.
+In emergency stop, drive is held at neutral, the solenoids are held in their safe state (exhaust open, inlets closed), and the LED blinks fast. The weapon trigger is tracked during the stop, so a trigger that was flipped ON during the stop (or was already ON at power-up) does not fire when the stop clears. It has to go OFF and back ON.
+
+**Limits of the software stop (set these up on the hardware)**
+
+- **Transmitter off or out of range:** the FS-iA6B keeps sending pulses when it loses the transmitter, so the Pico cannot detect that by itself. Set the transmitter failsafe so CH5 goes to ON (kill) on signal loss. Then a lost transmitter looks like a kill switch flip.
+- **Pico crash or power loss:** the ESCs must stop when their signal pulses disappear. Test this on the bench with the wheels off the ground.
+- **Exhaust valve:** it is normally closed, so "exhaust open" needs 12 V and a working Pico. A power loss closes it. The manual purge is the fallback.
 
 ---
 
@@ -84,10 +92,25 @@ The receiver script on the laptop monitors frame arrival time. If no frame arriv
 
 | Input | Channel | Function |
 |---|---|---|
-| Left stick | CH1/CH2 | Drive (direct to ESCs) |
-| Right stick | CH3/CH4 | Drive (direct to ESCs) |
+| Right stick up/down | CH2 | Drive A (through the Pico to ESC A) |
+| Left stick up/down | CH3 | Drive B (through the Pico to ESC B) |
 | SwA (top left, 2-pos) | CH5 | Kill switch - ON triggers emergency stop |
 | SwD (top right, 2-pos) | CH6 | Weapon trigger - edge-triggered, fires once per press |
+
+**Pico W wiring**
+
+| Pico pin | Direction | Connects to |
+|---|---|---|
+| GP16 | in | Receiver CH2, through the level shifter |
+| GP17 | in | Receiver CH3, through the level shifter |
+| GP18 | in | Receiver CH5 (kill switch), through the level shifter |
+| GP19 | in | Receiver CH6 (weapon trigger), through the level shifter |
+| GP20 | out | ESC A signal wire (was on receiver CH2) |
+| GP21 | out | ESC B signal wire (was on receiver CH3) |
+| GP14 | out | Exhaust valve relay |
+| GP15 | out | Inlet valves relay |
+
+The receiver outputs 5 V and the Pico pins are 3.3 V only, so all four receiver channels go through the 4-channel level shifter. The ESC signal outputs are 3.3 V. Pico ground, receiver ground and ESC signal ground must be common.
 
 The weapon fires on the rising edge of SwD, not while held. Holding the trigger down does not fire repeatedly - the Pico detects the OFF→ON transition and fires once, then waits for the trigger to be released before it can fire again.
 
@@ -101,7 +124,7 @@ The weapon fires on the rising edge of SwD, not while held. Holding the trigger 
 - Picamera2-compatible Pi camera
 - 2× solenoid valves (normally closed): main reservoir valve + piston valve
 - Pneumatic reservoir and plow mechanism
-- Drive ESCs (connected directly to receiver)
+- Drive ESCs (signal from the Pico W, GP20 and GP21)
 
 ---
 
